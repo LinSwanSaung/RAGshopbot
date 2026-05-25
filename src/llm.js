@@ -52,6 +52,7 @@ export const chat = new ChatOpenAI({
   maxRetries: 0,
   configuration: providerConfig,
   modelKwargs: compatKwargs,
+  streamUsage: false,
 });
 
 // Separate instance for filter extraction: deterministic (temp=0).
@@ -67,6 +68,16 @@ const extractor = new ChatOpenAI({
 // <thought>...</thought> blocks. Strip them so users / parsers don't see them.
 function cleanReply(text) {
   return String(text).replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
+}
+
+// Remove thinking block tags from text, including incomplete/unclosed ones during streaming
+export function cleanStreamingReply(text) {
+  let cleaned = String(text).replace(/<thought>[\s\S]*?<\/thought>/gi, '');
+  const openTagIndex = cleaned.lastIndexOf('<thought>');
+  if (openTagIndex !== -1) {
+    cleaned = cleaned.substring(0, openTagIndex);
+  }
+  return cleaned.trim();
 }
 
 // --- Reply generation -------------------------------------------------------
@@ -130,6 +141,19 @@ ${formatProducts(products)}`;
   ]);
 
   return cleanReply(response.content);
+}
+
+export async function askLLMStream(question, products, history = []) {
+  const userMessage = `Customer question: ${question}
+
+Relevant products:
+${formatProducts(products)}`;
+
+  return await chat.stream([
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...history,
+    { role: 'user', content: userMessage },
+  ]);
 }
 
 // --- Query interpretation (Step 4 #1 + context-aware) ----------------------

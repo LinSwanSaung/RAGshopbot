@@ -13,17 +13,42 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import { hybridSearch } from './search.js';
-import { askLLM, interpretMessage, withRateRetry } from './llm.js';
+import { askLLMStream, cleanStreamingReply, interpretMessage, withRateRetry } from './llm.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set in .env');
 
 const bot = new Telegraf(token);
 
-// Per-chat conversation history. In-memory only; resets on restart.
-// Keys: chat.id  -> Values: array of {role, content} alternating user/assistant.
 const histories = new Map();
 const MAX_HISTORY = 6; // 3 user/assistant turn pairs
+
+// Formats standard Markdown (like **bold**) to Telegram legacy Markdown (*)
+// and dynamically closes unmatched tags to prevent rendering/parsing errors.
+function toTelegramMarkdown(text) {
+  // Convert standard markdown bold (**) to Telegram legacy markdown bold (*)
+  let formatted = String(text).replace(/\*\*/g, '*');
+  
+  // Count single asterisks to ensure they are balanced
+  const asteriskCount = (formatted.match(/\*/g) || []).length;
+  if (asteriskCount % 2 !== 0) {
+    formatted += '*';
+  }
+  
+  // Count underscores to ensure they are balanced
+  const underscoreCount = (formatted.match(/_/g) || []).length;
+  if (underscoreCount % 2 !== 0) {
+    formatted += '_';
+  }
+  
+  // Count backticks to ensure they are balanced
+  const backtickCount = (formatted.match(/`/g) || []).length;
+  if (backtickCount % 2 !== 0) {
+    formatted += '`';
+  }
+  
+  return formatted;
+}
 
 bot.start((ctx) => {
   histories.delete(ctx.chat.id); // fresh start clears memory
@@ -43,8 +68,9 @@ bot.on('text', async (ctx) => {
   const question = ctx.message.text?.trim();
   if (!question) return;
 
+  let botMsg;
   try {
-    await ctx.sendChatAction('typing');
+    botMsg = await ctx.reply('Thinking...');
 
     // Fetch this user's recent conversation (last 3 turns) once.
     const history = histories.get(ctx.chat.id) ?? [];
@@ -70,27 +96,95 @@ bot.on('text', async (ctx) => {
     // legitimately return 0 products and still need an LLM reply using
     // the SHOP INFO baked into the system prompt.)
 
-    // 3. Generate the grounded reply, with conversation memory.
-    await ctx.sendChatAction('typing');
-    const reply = await withRateRetry(() => askLLM(question, products, history));
+    // 3. Generate the grounded reply using a stream, with conversation memory.
+    const stream = await withRateRetry(() => askLLMStream(question, products, history));
+
+    let accumulated = '';
+    let lastSentText = '';
+    let lastUpdateTime = Date.now();
+
+    for await (const chunk of stream) {
+      accumulated += chunk.content ?? '';
+      const cleaned = cleanStreamingReply(accumulated);
+
+      // Throttle updates to Telegram to avoid rate limits
+      const now = Date.now();
+      if (cleaned && cleaned !== lastSentText && now - lastUpdateTime > 1000) {
+        const telegramText = toTelegramMarkdown(cleaned) + ' ▌';
+        try {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            botMsg.message_id,
+            undefined,
+            telegramText,
+            { parse_mode: 'Markdown' }
+          );
+          lastSentText = cleaned;
+          lastUpdateTime = now;
+        } catch {
+          try {
+            await ctx.telegram.editMessageText(
+              ctx.chat.id,
+              botMsg.message_id,
+              undefined,
+              telegramText
+            );
+            lastSentText = cleaned;
+            lastUpdateTime = now;
+          } catch (err) {
+            // Ignore edit error if any (e.g. same text)
+          }
+        }
+      }
+    }
+
+    const finalCleaned = cleanStreamingReply(accumulated) || "Sorry, I couldn't generate a response.";
+    const finalTelegramText = toTelegramMarkdown(finalCleaned);
+
+    // Final edit to remove the cursor and format with markdown
+    if (finalCleaned !== lastSentText) {
+      try {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          botMsg.message_id,
+          undefined,
+          finalTelegramText,
+          { parse_mode: 'Markdown' }
+        );
+      } catch {
+        try {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            botMsg.message_id,
+            undefined,
+            finalTelegramText
+          );
+        } catch (err) {
+          console.error('Final edit failed:', err);
+        }
+      }
+    }
 
     // Append this turn and trim to the most recent MAX_HISTORY messages.
     history.push({ role: 'user', content: question });
-    history.push({ role: 'assistant', content: reply });
+    history.push({ role: 'assistant', content: finalCleaned });
     while (history.length > MAX_HISTORY) history.shift();
     histories.set(ctx.chat.id, history);
 
-    try {
-      await ctx.reply(reply, { parse_mode: 'Markdown' });
-    } catch {
-      await ctx.reply(reply);
-    }
   } catch (err) {
     console.error('handler error:', err?.message ?? err);
     const msg = err?.status === 429
       ? "I'm getting too many requests right now. Try again in a few seconds?"
       : "Sorry, something went wrong on my end. Please try again.";
-    await ctx.reply(msg);
+    if (botMsg) {
+      try {
+        await ctx.telegram.editMessageText(ctx.chat.id, botMsg.message_id, undefined, msg);
+      } catch {
+        await ctx.reply(msg);
+      }
+    } else {
+      await ctx.reply(msg);
+    }
   }
 });
 
