@@ -1,9 +1,17 @@
-// Seed catalog the indexer (npm run index) reads from.
+// Seed catalog the indexer (bun run index) reads from.
 // `text` is what gets embedded for semantic search; price/stock stay structured
 // columns in Supabase so they can be updated without re-embedding.
 // Some items intentionally have stock=0 to demonstrate the in-stock filter.
 
-export const products = [
+export interface Product {
+  id: number;
+  name: string;
+  text: string;
+  price: number;
+  stock: number;
+}
+
+export const products: Product[] = [
   // --- Men's tops (1-12) ---
   { id: 1,  name: 'Classic Oxford Button-Down',     text: 'crisp white cotton oxford shirt, button-down collar, smart casual office wear', price: 45,  stock: 18 },
   { id: 2,  name: 'Heather Grey Crewneck Tee',      text: 'soft combed cotton short-sleeve t-shirt, everyday basic, comfortable and breathable',  price: 18,  stock: 42 },

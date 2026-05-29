@@ -12,20 +12,20 @@
 
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
-import { hybridSearch } from './search.js';
-import { askLLMStream, cleanStreamingReply, interpretMessage, withRateRetry } from './llm.js';
+import { hybridSearch } from './search';
+import { askLLMStream, cleanStreamingReply, interpretMessage, withRateRetry, type ChatMessage } from './llm';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set in .env');
 
 const bot = new Telegraf(token);
 
-const histories = new Map();
+// Per-chat history. In-memory only — resets on bot restart.
+const histories = new Map<number, ChatMessage[]>();
 const MAX_HISTORY = 6; // 3 user/assistant turn pairs
 
-// Formats standard Markdown (like **bold**) to Telegram legacy Markdown (*)
-// and dynamically closes unmatched tags to prevent rendering/parsing errors.
-function toTelegramMarkdown(text) {
+// Converts **bold** to Telegram legacy Markdown (*bold*) and balances tags.
+function toTelegramMarkdown(text: string): string {
   // Convert standard markdown bold (**) to Telegram legacy markdown bold (*)
   let formatted = String(text).replace(/\*\*/g, '*');
   
@@ -171,7 +171,7 @@ bot.on('text', async (ctx) => {
     while (history.length > MAX_HISTORY) history.shift();
     histories.set(ctx.chat.id, history);
 
-  } catch (err) {
+  } catch (err: any) {
     console.error('handler error:', err?.message ?? err);
     const msg = err?.status === 429
       ? "I'm getting too many requests right now. Try again in a few seconds?"
@@ -188,7 +188,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-bot.catch((err, ctx) => {
+bot.catch((err: any, ctx) => {
   console.error(`[bot.catch] ${ctx?.updateType ?? 'unknown'}:`, err?.message ?? err);
   ctx?.reply("Sorry, something went wrong. Please try again.").catch(() => {});
 });

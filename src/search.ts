@@ -2,15 +2,39 @@
 //   - Vector layer: embeddings.embedQuery() + pgvector cosine ordering.
 //   - Structured layer: max_price / in_stock_only filtered inside the
 //     match_products() SQL function (see sql/schema.sql).
-// Same signature as the Step 0 in-memory version, so callers don't change.
 
-import { embeddings } from './embed.js';
-import { supabase } from './db.js';
+import { embeddings } from './embed';
+import { supabase } from './db';
+
+export interface SearchOpts {
+  maxPrice?: number;
+  inStockOnly?: boolean;
+  threshold?: number;
+  k?: number;
+}
+
+export interface SearchResult {
+  id: number;
+  name: string;
+  text: string;
+  price: number;
+  stock: number;
+  score: number;
+}
+
+interface MatchRow {
+  id: number;
+  name: string;
+  description: string;
+  price: number | string;
+  stock: number;
+  similarity: number;
+}
 
 export async function hybridSearch(
-  query,
-  { maxPrice = 1e9, inStockOnly = false, threshold = 0.35, k = 5 } = {}
-) {
+  query: string,
+  { maxPrice = 1e9, inStockOnly = false, threshold = 0.35, k = 5 }: SearchOpts = {}
+): Promise<SearchResult[]> {
   const queryEmbedding = await embeddings.embedQuery(query);
 
   const { data, error } = await supabase.rpc('match_products', {
@@ -22,7 +46,7 @@ export async function hybridSearch(
 
   if (error) throw error;
 
-  return data
+  return (data as MatchRow[])
     .filter((row) => row.similarity >= threshold)
     .map((row) => ({
       id: row.id,

@@ -1,20 +1,26 @@
 // Provider-agnostic LLM client (any OpenAI-compatible endpoint).
 // Configure via .env: LLM_API_KEY, LLM_BASE_URL, LLM_MODEL.
-//
-// Exports:
-//   chat            — main chat model for grounded replies
-//   askLLM(q, ps)   — runs the customer reply prompt
-//   extractFilters  — Step-4 polish: LLM-driven {maxPrice, inStockOnly} extraction
-//   withRateRetry   — one-shot delayed retry on 429 (rate-limit) errors
 
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ChatOpenAI } from '@langchain/openai';
+import type { SearchResult } from './search';
 
-// Load shop info from about_shop.md at startup. Edit that file + restart the
-// bot to change shop policies, hours, shipping, etc.
+// Object-literal type (not interface) so it's assignable to LangChain's
+// BaseMessageLike which requires Record<string, unknown> index signature.
+export type ChatMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+};
+
+export interface Filters {
+  searchQuery: string;
+  maxPrice?: number;
+  inStockOnly?: boolean;
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SHOP_INFO = readFileSync(join(__dirname, '..', 'about_shop.md'), 'utf-8').trim();
 
@@ -34,18 +40,14 @@ const providerConfig = {
   },
 };
 
-// Google AI Studio's OpenAI-compatible endpoint 400s on `frequency_penalty: 0`
-// (and a few other fields LangChain sends as defaults). modelKwargs spreads
-// last in invocationParams, so setting them to undefined drops them from the
-// JSON body. Safe on OpenRouter/OpenAI too — they ignore unset fields.
+// Google AI Studio 400s on frequency_penalty/presence_penalty: 0.
+// modelKwargs spreads last in invocationParams so undefined drops the fields.
 const compatKwargs = {
   frequency_penalty: undefined,
   presence_penalty: undefined,
 };
 
-// maxRetries:0 -> no internal LangChain retries (each fails fast in seconds,
-// not the ~30s LangChain spends on its own backoff). withRateRetry() is our
-// single, controlled retry layer above this.
+// maxRetries:0 — fail fast; withRateRetry() is our single controlled retry layer.
 export const chat = new ChatOpenAI({
   apiKey, model,
   temperature: 0.3,
@@ -55,7 +57,6 @@ export const chat = new ChatOpenAI({
   streamUsage: false,
 });
 
-// Separate instance for filter extraction: deterministic (temp=0).
 const extractor = new ChatOpenAI({
   apiKey, model,
   temperature: 0,
@@ -64,19 +65,15 @@ const extractor = new ChatOpenAI({
   modelKwargs: compatKwargs,
 });
 
-// Some models (Gemma 4, certain reasoning models) prefix replies with
-// <thought>...</thought> blocks. Strip them so users / parsers don't see them.
-function cleanReply(text) {
+function cleanReply(text: unknown): string {
   return String(text).replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
 }
 
-// Remove thinking block tags from text, including incomplete/unclosed ones during streaming
-export function cleanStreamingReply(text) {
+// Strips thinking blocks including incomplete/unclosed ones (safe during streaming).
+export function cleanStreamingReply(text: unknown): string {
   let cleaned = String(text).replace(/<thought>[\s\S]*?<\/thought>/gi, '');
   const openTagIndex = cleaned.lastIndexOf('<thought>');
-  if (openTagIndex !== -1) {
-    cleaned = cleaned.substring(0, openTagIndex);
-  }
+  if (openTagIndex !== -1) cleaned = cleaned.substring(0, openTagIndex);
   return cleaned.trim();
 }
 
@@ -118,45 +115,41 @@ Never display stock numbers. Skip out-of-stock products entirely. If NONE of the
 
 Keep replies short. Use markdown **bold** for product IDs and names.`;
 
-function formatProducts(products) {
+function formatProducts(products: SearchResult[]): string {
   if (products.length === 0) return '(none)';
   return products
-    .map(
-      (p) =>
-        `- #${p.id} ${p.name} — ${p.text}. Price: $${p.price}. Stock: ${p.stock}.`
-    )
+    .map((p) => `- #${p.id} ${p.name} — ${p.text}. Price: $${p.price}. Stock: ${p.stock}.`)
     .join('\n');
 }
 
-export async function askLLM(question, products, history = []) {
-  const userMessage = `Customer question: ${question}
-
-Relevant products:
-${formatProducts(products)}`;
-
+export async function askLLM(
+  question: string,
+  products: SearchResult[],
+  history: ChatMessage[] = []
+): Promise<string> {
+  const userMessage = `Customer question: ${question}\n\nRelevant products:\n${formatProducts(products)}`;
   const response = await chat.invoke([
     { role: 'system', content: SYSTEM_PROMPT },
     ...history,
     { role: 'user', content: userMessage },
-  ]);
-
+  ] as any[]);
   return cleanReply(response.content);
 }
 
-export async function askLLMStream(question, products, history = []) {
-  const userMessage = `Customer question: ${question}
-
-Relevant products:
-${formatProducts(products)}`;
-
-  return await chat.stream([
+export async function askLLMStream(
+  question: string,
+  products: SearchResult[],
+  history: ChatMessage[] = []
+) {
+  const userMessage = `Customer question: ${question}\n\nRelevant products:\n${formatProducts(products)}`;
+  return chat.stream([
     { role: 'system', content: SYSTEM_PROMPT },
     ...history,
     { role: 'user', content: userMessage },
-  ]);
+  ] as any[]);
 }
 
-// --- Query interpretation (Step 4 #1 + context-aware) ----------------------
+// --- Query interpretation ---------------------------------------------------
 
 const INTERPRET_SYSTEM = `You are a query parser. Read the customer's most recent message AND the prior conversation, then output ONE JSON object with these fields:
 
@@ -186,49 +179,39 @@ Examples:
   Input: "show me dresses"
   Output: {"searchQuery": "dresses"}`;
 
-export async function interpretMessage(question, history = []) {
+export async function interpretMessage(
+  question: string,
+  history: ChatMessage[] = []
+): Promise<Filters> {
   const response = await extractor.invoke([
     { role: 'system', content: INTERPRET_SYSTEM },
     ...history,
     { role: 'user', content: question },
-  ]);
+  ] as any[]);
 
   let raw = cleanReply(response.content);
   raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   const match = raw.match(/\{[\s\S]*\}/);
-
-  // Sensible default: if the LLM call fails or returns garbage, fall back to
-  // the raw user message as the search query with no filters.
-  const fallback = { searchQuery: question };
+  const fallback: Filters = { searchQuery: question };
   if (!match) return fallback;
 
-  let parsed;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return fallback;
-  }
+  let parsed: any;
+  try { parsed = JSON.parse(match[0]); } catch { return fallback; }
 
-  const out = {
+  const out: Filters = {
     searchQuery:
       typeof parsed.searchQuery === 'string' && parsed.searchQuery.trim()
         ? parsed.searchQuery.trim()
         : question,
   };
-  if (typeof parsed.maxPrice === 'number' && parsed.maxPrice > 0) {
-    out.maxPrice = parsed.maxPrice;
-  }
-  if (parsed.inStockOnly === true) {
-    out.inStockOnly = true;
-  }
+  if (typeof parsed.maxPrice === 'number' && parsed.maxPrice > 0) out.maxPrice = parsed.maxPrice;
+  if (parsed.inStockOnly === true) out.inStockOnly = true;
   return out;
 }
 
-// --- Transient-error retry helper (Step 4 #3) ------------------------------
-// Retries once on 429 (rate limit) AND on network blips like "fetch failed",
-// ECONNRESET, ETIMEDOUT — anything that's likely transient.
+// --- Transient-error retry -------------------------------------------------
 
-function isTransient(err) {
+function isTransient(err: any): boolean {
   if (err?.status === 429) return true;
   const code = err?.code ?? err?.cause?.code;
   if (code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ENOTFOUND') return true;
@@ -236,10 +219,13 @@ function isTransient(err) {
   return false;
 }
 
-export async function withRateRetry(fn, { delayMs = 2000 } = {}) {
+export async function withRateRetry<T>(
+  fn: () => Promise<T>,
+  { delayMs = 2000 }: { delayMs?: number } = {}
+): Promise<T> {
   try {
     return await fn();
-  } catch (err) {
+  } catch (err: any) {
     if (!isTransient(err)) throw err;
     console.log(`[retry] transient (${err?.status ?? err?.code ?? err?.message?.split('\n')[0]}) — waiting ${delayMs}ms then retrying once`);
     await new Promise((r) => setTimeout(r, delayMs));
