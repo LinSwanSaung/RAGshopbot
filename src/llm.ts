@@ -212,7 +212,7 @@ export async function interpretMessage(
 // --- Transient-error retry -------------------------------------------------
 
 function isTransient(err: any): boolean {
-  if (err?.status === 429) return true;
+  if (err?.status === 429 || err?.status === 503 || err?.status === 502) return true;
   const code = err?.code ?? err?.cause?.code;
   if (code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ENOTFOUND') return true;
   if (/fetch failed|socket hang up|network/i.test(String(err?.message ?? ''))) return true;
