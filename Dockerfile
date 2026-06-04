@@ -2,8 +2,9 @@ FROM oven/bun:1 AS base
 WORKDIR /app
 
 # Install dependencies first (cached layer if package files unchanged)
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+COPY package.json ./
+COPY bun.lock* ./
+RUN bun install
 
 # Copy source
 COPY src/ ./src/
