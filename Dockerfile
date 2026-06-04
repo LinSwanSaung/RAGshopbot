@@ -15,4 +15,6 @@ COPY tsconfig.json ./
 EXPOSE 4000
 
 # Production: webhook mode. Set BOT_ENV=production + WEBHOOK_URL in env.
-CMD ["bun", "src/bot.ts"]
+# Production entry point: multi-tenant webhook server.
+# For single-tenant dev polling: bun src/bot.ts
+CMD ["bun", "src/server.ts"]

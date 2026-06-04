@@ -8,6 +8,11 @@ import { dirname, join } from 'node:path';
 import { ChatOpenAI } from '@langchain/openai';
 import type { SearchResult } from './search';
 
+// Fallback shop info used by single-tenant bot.ts (reads about_shop.md).
+// Multi-tenant server.ts passes businessInfo directly to askLLM() instead.
+const __file = fileURLToPath(import.meta.url);
+const __rootDir = dirname(dirname(__file));
+
 // Object-literal type (not interface) so it's assignable to LangChain's
 // BaseMessageLike which requires Record<string, unknown> index signature.
 export type ChatMessage = {
@@ -21,8 +26,7 @@ export interface Filters {
   inStockOnly?: boolean;
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SHOP_INFO = readFileSync(join(__dirname, '..', 'about_shop.md'), 'utf-8').trim();
+const SHOP_INFO_FALLBACK = readFileSync(join(__rootDir, 'about_shop.md'), 'utf-8').trim();
 
 const apiKey  = process.env.LLM_API_KEY;
 const baseURL = process.env.LLM_BASE_URL;
@@ -79,10 +83,11 @@ export function cleanStreamingReply(text: unknown): string {
 
 // --- Reply generation -------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a warm, helpful assistant for the online clothing shop described below.
+function buildSystemPrompt(shopInfo: string): string {
+  return `You are a warm, helpful assistant for the online shop described below.
 
 ==== ABOUT THE SHOP ====
-${SHOP_INFO}
+${shopInfo}
 ==== END SHOP INFO ====
 
 You can answer two kinds of questions:
@@ -114,6 +119,7 @@ When answering a SHOP question, just give a short conversational reply — no bu
 Never display stock numbers. Skip out-of-stock products entirely. If NONE of the retrieved items are in stock, briefly say so and skip the bullets.
 
 Keep replies short. Use markdown **bold** for product IDs and names.`;
+}
 
 function formatProducts(products: SearchResult[]): string {
   if (products.length === 0) return '(none)';
@@ -125,11 +131,13 @@ function formatProducts(products: SearchResult[]): string {
 export async function askLLM(
   question: string,
   products: SearchResult[],
-  history: ChatMessage[] = []
+  history: ChatMessage[] = [],
+  businessInfo: string = SHOP_INFO_FALLBACK
 ): Promise<string> {
+  const systemPrompt = buildSystemPrompt(businessInfo);
   const userMessage = `Customer question: ${question}\n\nRelevant products:\n${formatProducts(products)}`;
   const response = await chat.invoke([
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     ...history,
     { role: 'user', content: userMessage },
   ] as any[]);
@@ -139,11 +147,13 @@ export async function askLLM(
 export async function askLLMStream(
   question: string,
   products: SearchResult[],
-  history: ChatMessage[] = []
+  history: ChatMessage[] = [],
+  businessInfo: string = SHOP_INFO_FALLBACK
 ) {
+  const systemPrompt = buildSystemPrompt(businessInfo);
   const userMessage = `Customer question: ${question}\n\nRelevant products:\n${formatProducts(products)}`;
   return chat.stream([
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     ...history,
     { role: 'user', content: userMessage },
   ] as any[]);

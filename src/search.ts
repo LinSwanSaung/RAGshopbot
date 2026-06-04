@@ -1,7 +1,7 @@
 // Hybrid search against Supabase + pgvector.
 //   - Vector layer: embeddings.embedQuery() + pgvector cosine ordering.
-//   - Structured layer: max_price / in_stock_only filtered inside the
-//     match_products() SQL function (see sql/schema.sql).
+//   - Structured layer: max_price / in_stock_only / user_id filtered inside
+//     the match_products() SQL function (see sql/schema.sql).
 
 import { embeddings } from './embed';
 import { supabase } from './db';
@@ -11,6 +11,7 @@ export interface SearchOpts {
   inStockOnly?: boolean;
   threshold?: number;
   k?: number;
+  userId?: string; // scope to this shop's products (multi-tenant)
 }
 
 export interface SearchResult {
@@ -33,7 +34,7 @@ interface MatchRow {
 
 export async function hybridSearch(
   query: string,
-  { maxPrice = 1e9, inStockOnly = false, threshold = 0.35, k = 5 }: SearchOpts = {}
+  { maxPrice = 1e9, inStockOnly = false, threshold = 0.35, k = 5, userId }: SearchOpts = {}
 ): Promise<SearchResult[]> {
   const queryEmbedding = await embeddings.embedQuery(query);
 
@@ -42,6 +43,7 @@ export async function hybridSearch(
     match_count: k,
     max_price: maxPrice,
     in_stock_only: inStockOnly,
+    p_user_id: userId ?? null,
   });
 
   if (error) throw error;
