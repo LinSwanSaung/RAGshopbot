@@ -194,8 +194,23 @@ bot.catch((err: any, ctx) => {
 });
 
 const me = await bot.telegram.getMe();
-console.log(`Bot launched as @${me.username} (id=${me.id}). Press Ctrl+C to stop.`);
+const isProd = process.env.BOT_ENV === 'production';
 
-bot.launch();
+if (isProd) {
+  const webhookUrl = process.env.WEBHOOK_URL;
+  if (!webhookUrl) throw new Error('WEBHOOK_URL must be set in production .env');
+
+  await bot.telegram.setWebhook(webhookUrl);
+  console.log(`Webhook registered: ${webhookUrl}`);
+
+  // Telegraf's built-in HTTP server — listens on port 4000, path /bot/webhook.
+  // nginx proxies https://13.229.238.234:8443/bot/webhook → http://localhost:4000/bot/webhook.
+  bot.startWebhook('/bot/webhook', undefined, 4000, '0.0.0.0');
+  console.log(`Bot launched as @${me.username} in WEBHOOK mode (port 4000).`);
+} else {
+  bot.launch();
+  console.log(`Bot launched as @${me.username} in POLLING mode (development).`);
+}
+
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
